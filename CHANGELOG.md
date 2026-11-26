@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.1.3](https://github.com/amazing-soft-dev/temp_repo/compare/v0.1.2...v0.1.3) (2026-11-26)
+
+
+### Bug Fixes
+
+* **greet:** add farewell for the logout page ([42402f6](https://github.com/amazing-soft-dev/temp_repo/commit/42402f6b31b37bfa496196813ed03646d9b3bc11))
+* **greet:** add farewell for the logout page ([42ef6bc](https://github.com/amazing-soft-dev/temp_repo/commit/42ef6bc44613a33d0be73bcde1906562f5649296))
+
 ## [0.1.2](https://github.com/amazing-soft-dev/temp_repo/compare/v0.1.1...v0.1.2) (2026-11-26)
 
 
