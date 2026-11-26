@@ -1,0 +1,117 @@
+name: CI
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]   # ready_for_review: re-check when a draft is marked ready
+  push:
+    branches: [dev, main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  conventions:
+    name: Branch and commit conventions
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          ref: ${{ github.event.pull_request.head.sha }}
+      - name: Check branch name and commit subjects
+        env:
+          HEAD_REF: ${{ github.head_ref }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          case "$HEAD_REF" in
+            dev | main | release-please--branches--* | dependabot/*) echo "Automation branch; skipping."; exit 0 ;;
+          esac
+          if ! [[ "$HEAD_REF" =~ ^(feat|fix|docs|ci|build|hotfix|backport)/[0-9]+-[a-z0-9._-]+$ ]]; then
+            echo "::error::Branch '$HEAD_REF' must look like feat/12-short-description (prefixes: feat, fix, docs, ci, build, hotfix, backport)."
+            exit 1
+          fi
+          pattern='^(feat|fix|docs|style|refactor|perf|test|build|ci|chore|revert)(\([A-Za-z0-9._/-]+\))?!?: .+'
+          bad=0
+          while IFS= read -r subject; do
+            if ! [[ "$subject" =~ $pattern ]]; then
+              echo "::error::Not a Conventional Commit subject: $subject"
+              bad=1
+            fi
+          done < <(git log --no-merges --format=%s "$BASE_SHA..$HEAD_SHA")
+          exit "$bad"
+
+  check:
+    name: Lint and test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v7
+        with:
+          enable-cache: true               # reads .python-version
+      - run: uv sync --locked
+      - run: uv run ruff check .
+      - run: uv run ruff format --check .
+      - run: uv run pytest
+
+  build:
+    name: Build (${{ matrix.variant }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        variant: [default]   # one entry per artifact that ships, e.g. [server, static]
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v7
+        with:
+          enable-cache: true               # reads .python-version
+      - run: uv build                      # build job (packages only)
+      - name: Assert the wheel and sdist exist
+        run: ls dist/*.whl dist/*.tar.gz
+
+  ci-passed:
+    name: CI passed
+    if: always()
+    needs: [conventions, check, build]
+    runs-on: ubuntu-latest
+    permissions:
+      pull-requests: write
+    steps:
+      - name: Post or update summary comment
+        if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR: ${{ github.event.pull_request.number }}
+          CONVENTIONS: ${{ needs.conventions.result }}
+          CHECK: ${{ needs.check.result }}
+          BUILD: ${{ needs.build.result }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          marker='<!-- ci-summary -->'
+          body=$(printf '%s\n### CI summary\n\n| Job | Result |\n| --- | --- |\n' "$marker"
+                 printf '| %s | %s |\n' "Branch and commit conventions" "$CONVENTIONS" "Lint and test" "$CHECK" "Build" "$BUILD"
+                 printf '\n[Run details](%s)\n' "$RUN_URL")
+          id=$(gh api "repos/$GITHUB_REPOSITORY/issues/$PR/comments" --paginate \
+                 --jq ".[] | select(.body | startswith(\"$marker\")) | .id" | head -n1)
+          if [ -n "$id" ]; then
+            gh api -X PATCH "repos/$GITHUB_REPOSITORY/issues/comments/$id" -f body="$body"
+          else
+            gh api -X POST "repos/$GITHUB_REPOSITORY/issues/$PR/comments" -f body="$body"
+          fi
+      - name: Require every job to succeed
+        env:
+          CONVENTIONS: ${{ needs.conventions.result }}
+          CHECK: ${{ needs.check.result }}
+          BUILD: ${{ needs.build.result }}
+        run: |
+          case "$CONVENTIONS" in success | skipped) ;; *) echo "conventions: $CONVENTIONS"; exit 1 ;; esac
+          test "$CHECK" = success || { echo "check: $CHECK"; exit 1; }
+          test "$BUILD" = success || { echo "build: $BUILD"; exit 1; }

@@ -1,0 +1,15 @@
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    target-branch: dev
+    schedule: { interval: weekly }
+    commit-message: { prefix: ci }
+  - package-ecosystem: uv
+    directory: /
+    target-branch: dev
+    schedule: { interval: weekly }
+    commit-message:
+      prefix: fix                     # runtime dependency bumps become patch releases
+      prefix-development: build       # dev-only bumps don't trigger a release
+      include: scope

@@ -1,0 +1,85 @@
+name: Open pull request
+
+on:
+  push:
+    branches:
+      - dev
+      - main
+      - 'feat/**'
+      - 'fix/**'
+      - 'docs/**'
+      - 'ci/**'
+      - 'build/**'
+      - 'hotfix/**'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: open-pr-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  open:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - name: Open or update pull request
+        env:
+          GH_TOKEN: ${{ secrets.GH_TOKEN }}
+          BRANCH: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+
+          # Issue numbers from "<prefix>/<n>-..." in merge-commit messages and from closing keywords.
+          issues_in() {
+            git log "$1" --format=%B \
+              | grep -oiE '(from [^ ]+/(feat|fix|docs|ci|build|hotfix)/[0-9]+)|((close[sd]?|fix(e[sd])?|resolve[sd]?):? #[0-9]+)' \
+              | grep -oE '[0-9]+$' || true
+          }
+          branch_issue() { printf '%s\n' "$1" | grep -oE '^[a-z]+/[0-9]+' | grep -oE '[0-9]+$' || true; }
+          closes_lines() { sort -un | grep . | sed 's/^/Closes #/' || true; }
+          ahead() { [ "$(git rev-list --count "origin/$1..origin/$2")" -gt 0 ]; }
+          tree_differs() { ! git diff --quiet "origin/$1" "origin/$2"; }
+          first_subject() { git log --reverse --format=%s "origin/$1..origin/$2" | sed -n '1p'; }
+
+          # upsert <head> <base> <title> <body> <update|create-only>
+          upsert() {
+            existing=$(gh pr list --head "$1" --base "$2" --state open --json number --jq '.[0].number // empty')
+            if [ -n "$existing" ]; then
+              if [ "$5" = update ]; then gh pr edit "$existing" --body "$4"; echo "Updated #$existing"; fi
+              return 0
+            fi
+            gh pr create --head "$1" --base "$2" --title "$3" --body "$4"
+          }
+
+          case "$BRANCH" in
+            dev)
+              # Compare trees, not commit counts: back-merge commits must not trigger an empty release.
+              tree_differs main dev || { echo "dev has no changes that main lacks"; exit 0; }
+              body="Release \`dev\` → \`main\`."$'\n\n'"$(issues_in origin/main..origin/dev | closes_lines)"
+              upsert dev main "release: dev → main" "$body" update
+              ;;
+            main)
+              # A hotfix or release commit landed on main: bring it back into dev.
+              ahead dev main || { echo "dev already contains main"; exit 0; }
+              tree_differs dev main || { echo "dev and main have the same files"; exit 0; }
+              upsert main dev "chore: back-merge main into dev" \
+                "Brings release and hotfix commits from \`main\` back into \`dev\`." update
+              ;;
+            hotfix/*)
+              ahead main "$BRANCH" || { echo "$BRANCH has no commits beyond main"; exit 0; }
+              closes=$({ branch_issue "$BRANCH"; issues_in "origin/main..origin/$BRANCH"; } | closes_lines)
+              body="Hotfix into \`main\`. It is merged back into \`dev\` automatically."$'\n\n'"$closes"
+              upsert "$BRANCH" main "$(first_subject main "$BRANCH")" "$body" update
+              ;;
+            *)
+              ahead dev "$BRANCH" || { echo "$BRANCH has no commits beyond dev"; exit 0; }
+              n=$(branch_issue "$BRANCH")
+              body="Automated pull request for \`$BRANCH\`."
+              if [ -n "$n" ]; then body+=$'\n\n'"Refs #$n — the issue closes when this reaches \`main\`."; fi
+              upsert "$BRANCH" dev "$(first_subject dev "$BRANCH")" "$body" create-only
+              ;;
+          esac

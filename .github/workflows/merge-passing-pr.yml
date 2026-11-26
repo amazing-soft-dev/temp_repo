@@ -1,0 +1,53 @@
+name: Merge passing pull request
+
+# Runs from the default branch's copy of this file, so a pull request cannot change what it does.
+on:
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
+
+permissions:
+  contents: read
+
+jobs:
+  merge:
+    if: github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'pull_request'
+    runs-on: ubuntu-latest
+    concurrency:
+      group: merge-${{ github.event.workflow_run.head_branch }}
+      cancel-in-progress: false
+    steps:
+      - name: Merge if eligible
+        env:
+          GH_TOKEN: ${{ secrets.GH_TOKEN }}
+          REPO: ${{ github.repository }}
+          HEAD_BRANCH: ${{ github.event.workflow_run.head_branch }}
+          HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+        run: |
+          set -euo pipefail
+
+          eligible() {  # <head> <base>
+            case "$1:$2" in
+              feat/*:dev | fix/*:dev | docs/*:dev | ci/*:dev | build/*:dev) return 0 ;;
+              hotfix/*:main | dev:main | main:dev) return 0 ;;
+              release-please--branches--main*:main) return 0 ;;
+            esac
+            return 1
+          }
+
+          prs=$(gh pr list -R "$REPO" --head "$HEAD_BRANCH" --state open \
+                  --json number,baseRefName,isCrossRepository,isDraft,headRefOid \
+                  --jq '.[] | "\(.number) \(.baseRefName) \(.isCrossRepository) \(.isDraft) \(.headRefOid)"')
+          [ -n "$prs" ] || { echo "No open pull request for $HEAD_BRANCH"; exit 0; }
+
+          while read -r number base cross draft oid; do
+            if [ "$cross" != false ]; then echo "#$number comes from a fork; a person merges it"; continue; fi
+            if [ "$draft" != false ]; then echo "#$number is a draft; it merges after it is marked ready and CI passes"; continue; fi
+            if [ "$oid" != "$HEAD_SHA" ]; then echo "#$number has newer commits; waiting for their CI run"; continue; fi
+            if ! eligible "$HEAD_BRANCH" "$base"; then echo "#$number ($HEAD_BRANCH → $base) is not auto-merged"; continue; fi
+            if gh pr merge "$number" -R "$REPO" --merge --match-head-commit "$HEAD_SHA"; then
+              echo "Merged #$number into $base"
+            else
+              echo "::warning::#$number was not merged (head moved, conflicts, or a required review is missing)"
+            fi
+          done <<< "$prs"

@@ -1,0 +1,48 @@
+name: Release
+
+# Reads Conventional Commits on main, keeps a release PR open with the next version
+# and CHANGELOG, and tags + publishes a GitHub Release when that PR merges.
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  release-please:
+    runs-on: ubuntu-latest
+    outputs:
+      release_created: ${{ steps.release.outputs.release_created }}
+      tag_name: ${{ steps.release.outputs.tag_name }}
+      prs_created: ${{ steps.release.outputs.prs_created }}
+    steps:
+      - id: release
+        uses: googleapis/release-please-action@v5
+        with:
+          token: ${{ secrets.GH_TOKEN }}   # GITHUB_TOKEN would not start CI on the release PR
+          config-file: release-please-config.json
+          manifest-file: .release-please-manifest.json
+
+  lockfile:
+    needs: release-please
+    if: needs.release-please.outputs.prs_created == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: release-please--branches--main
+          token: ${{ secrets.GH_TOKEN }}    # a push with GITHUB_TOKEN would not re-run CI
+      - uses: astral-sh/setup-uv@v7
+      - run: uv lock
+      - name: Commit refreshed lockfile
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          if git diff --quiet; then echo "Lockfile already matches"; exit 0; fi
+          git commit -am "chore: refresh lockfile for release"
+          git push
